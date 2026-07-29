@@ -1,31 +1,87 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import type { CSSProperties, HTMLAttributes, KeyboardEvent, ReactNode } from "react";
 import {
   AreaChart, Area, PieChart, Pie, Cell, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import {
-  Clock, Settings2, Sun, Moon, Play, Trash2, Copy, Download,
+  Settings2, Sun, Moon, Play, Trash2, Copy, Download,
   CheckCircle2, XCircle, Coffee, LogIn, LogOut, AlertTriangle,
   ClipboardPaste, Loader2, Activity, Search, ArrowUpDown,
   TimerReset, Fingerprint, Bell, ShieldCheck, FileText, FileSpreadsheet,
   Sparkles, ChevronRight, ListChecks,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import confetti from "canvas-confetti";
 /* ---------------------------------------------------------------------- */
 /*  Helpers                                                                */
 /* ---------------------------------------------------------------------- */
 
-const pad2 = (n) => String(n).padStart(2, "0");
+type Settings = {
+  name: string;
+  officeStart: string;
+  officeEnd: string;
+  requiredHours: string;
+  maxBreak: string;
+  latestCheckIn: string;
+};
 
-function toMinutes(hhmm) {
+type Session = { in: number; out: number | null };
+type WorkStatus = "Working" | "Completed" | "Incomplete";
+type Rule = { key: string; label: string; pass: boolean; detail: string };
+type PointSegment = { type: "checkin"; time: number } | { type: "checkout"; time: number };
+type WorkSegment = { type: "checkin-work" | "resume"; from: number; to: number; ongoing: boolean };
+type BreakSegment = { type: "break"; from: number; to: number };
+type TimelineSegment = PointSegment | WorkSegment | BreakSegment;
+type BreakSegmentWithDuration = BreakSegment & { duration: number };
+
+type CalculationResult = {
+  sessions: Session[];
+  checkIn: number;
+  lastOut: number | null;
+  isOngoing: boolean;
+  workedMinutes: number;
+  breakMinutes: number;
+  expectedLogout: number;
+  remaining: number;
+  extra: number;
+  completed: boolean;
+  status: WorkStatus;
+  rules: Rule[];
+  compliance: number;
+  timeline: TimelineSegment[];
+  breakSegments: BreakSegmentWithDuration[];
+  requiredMinutes: number;
+  maxBreak: number;
+  officeStart: number;
+  officeEnd: number;
+  targetPercent: number;
+};
+
+type HistoryRow = {
+  id: number;
+  date: string;
+  checkIn: string;
+  worked: string;
+  workedMinutes: number;
+  breakMin: string;
+  breakMinutes: number;
+  logout: string;
+  status: WorkStatus;
+  compliance: number;
+};
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+function toMinutes(hhmm: string) {
   if (!hhmm) return 0;
   const [h, m] = hhmm.split(":").map(Number);
   return h * 60 + m;
 }
 
-function formatClock(minsRaw) {
+function formatClock(minsRaw: number) {
   const mins = ((Math.round(minsRaw) % 1440) + 1440) % 1440;
-  let h = Math.floor(mins / 60);
+  const h = Math.floor(mins / 60);
   const m = mins % 60;
   const period = h >= 12 ? "PM" : "AM";
   let h12 = h % 12;
@@ -33,7 +89,7 @@ function formatClock(minsRaw) {
   return `${h12}:${pad2(m)} ${period}`;
 }
 
-function formatDuration(minsRaw) {
+function formatDuration(minsRaw: number) {
   const mins = Math.max(0, Math.round(minsRaw));
   const h = Math.floor(mins / 60);
   const m = mins % 60;
@@ -51,10 +107,10 @@ function fullDateLabel(d = new Date()) {
 }
 
 /** Parse raw biometric log text into a sorted, de-duplicated list of minute-of-day values. */
-function parseBiometricLog(text) {
+function parseBiometricLog(text: string) {
   const lines = text.split("\n");
   const timeRegex = /^(\d{1,2}):(\d{2})$/;
-  const found = [];
+  const found: number[] = [];
   for (const raw of lines) {
     const line = raw.trim().replace(/\.$/, "");
     if (!line) continue;
@@ -71,28 +127,28 @@ function parseBiometricLog(text) {
   return unique;
 }
 
-function buildSessions(timestamps) {
-  const sessions = [];
+function buildSessions(timestamps: number[]) {
+  const sessions: Session[] = [];
   for (let i = 0; i < timestamps.length; i += 2) {
     sessions.push({ in: timestamps[i], out: timestamps[i + 1] ?? null });
   }
   return sessions;
 }
 
-function computeResult(timestamps, settings, nowMinutes) {
+function computeResult(timestamps: number[], settings: Settings, nowMinutes: number): CalculationResult | { error: string } {
   if (!timestamps.length) {
     return { error: "No valid biometric timestamps found. Check the log format." };
   }
 
   const sessions = buildSessions(timestamps);
-  const requiredMinutes = Math.round(parseFloat(settings.requiredHours || 0) * 60);
-  const maxBreak = parseInt(settings.maxBreak || 0, 10);
+  const requiredMinutes = Math.round(parseFloat(settings.requiredHours || "0") * 60);
+  const maxBreak = parseInt(settings.maxBreak || "0", 10);
   const officeStart = toMinutes(settings.officeStart);
   const officeEnd = toMinutes(settings.officeEnd);
   const latestCheckIn = toMinutes(settings.latestCheckIn);
 
-  const checkIn = sessions[0].in;
-  const lastSession = sessions[sessions.length - 1];
+  const checkIn = sessions[0]!.in;
+  const lastSession = sessions[sessions.length - 1]!;
   const isOngoing = lastSession.out === null;
   const lastOut = isOngoing ? null : lastSession.out;
 
@@ -112,7 +168,7 @@ function computeResult(timestamps, settings, nowMinutes) {
   const completed = workedMinutes >= requiredMinutes;
   const targetPercent = requiredMinutes > 0 ? Math.round((workedMinutes / requiredMinutes) * 100) : 0;
 
-  let status;
+  let status: WorkStatus;
   if (isOngoing) status = "Working";
   else if (completed) status = "Completed";
   else status = "Incomplete";
@@ -126,16 +182,18 @@ function computeResult(timestamps, settings, nowMinutes) {
 
   const compliance = Math.round((rules.filter((r) => r.pass).length / rules.length) * 100);
 
-  const timeline = [];
+  const timeline: TimelineSegment[] = [];
   timeline.push({ type: "checkin", time: checkIn });
   sessions.forEach((s, idx) => {
     timeline.push({ type: idx === 0 ? "checkin-work" : "resume", from: s.in, to: s.out ?? nowMinutes, ongoing: s.out === null });
     const next = sessions[idx + 1];
     if (s.out !== null && next) timeline.push({ type: "break", from: s.out, to: next.in });
   });
-  if (!isOngoing) timeline.push({ type: "checkout", time: lastOut });
+  if (lastOut !== null) timeline.push({ type: "checkout", time: lastOut });
 
-  const breakSegments = timeline.filter((t) => t.type === "break").map((t) => ({ ...t, duration: t.to - t.from }));
+  const breakSegments = timeline
+    .filter((segment): segment is BreakSegment => segment.type === "break")
+    .map((segment) => ({ ...segment, duration: segment.to - segment.from }));
 
   return {
     sessions, checkIn, lastOut, isOngoing, workedMinutes, breakMinutes, expectedLogout,
@@ -177,6 +235,11 @@ const PALETTE = {
   },
 };
 
+type Theme = keyof typeof PALETTE;
+type Palette = (typeof PALETTE)[Theme];
+type AccentColor = "green" | "amber" | "violet";
+type BreakColorKey = "violet" | "blue" | "amber" | "teal";
+
 const FONT_HEAD = "'Space Grotesk', 'Segoe UI', sans-serif";
 const FONT_BODY = "'Inter', 'Segoe UI', sans-serif";
 const FONT_MONO = "'JetBrains Mono', 'SFMono-Regular', monospace";
@@ -185,14 +248,15 @@ const FONT_MONO = "'JetBrains Mono', 'SFMono-Regular', monospace";
 /*  Small building blocks                                                  */
 /* ---------------------------------------------------------------------- */
 
-function useCountUp(target, duration = 650) {
+function useCountUp(target: number, duration = 650) {
   const [val, setVal] = useState(0);
   const prevTarget = useRef(0);
   useEffect(() => {
     const from = prevTarget.current;
     const to = target;
-    let raf, start = null;
-    const step = (ts) => {
+    let raf = 0;
+    let start: number | null = null;
+    const step = (ts: number) => {
       if (start === null) start = ts;
       const progress = Math.min((ts - start) / duration, 1);
       const eased = 1 - Math.pow(1 - progress, 3);
@@ -207,7 +271,9 @@ function useCountUp(target, duration = 650) {
   return val;
 }
 
-function Card({ c, children, style, ...rest }) {
+type CardProps = HTMLAttributes<HTMLDivElement> & { c: Palette };
+
+function Card({ c, children, style, ...rest }: CardProps) {
   return (
     <div style={{ background: c.panel, border: `1px solid ${c.border}`, borderRadius: 16, backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", ...style }} {...rest}>
       {children}
@@ -215,7 +281,15 @@ function Card({ c, children, style, ...rest }) {
   );
 }
 
-function IconBadge({ color, colorSoft, size = 34, radius = 10, children }) {
+type IconBadgeProps = {
+  color: string;
+  colorSoft: string;
+  size?: number;
+  radius?: number;
+  children: ReactNode;
+};
+
+function IconBadge({ color, colorSoft, size = 34, radius = 10, children }: IconBadgeProps) {
   return (
     <div style={{ width: size, height: size, borderRadius: radius, display: "flex", alignItems: "center", justifyContent: "center", background: colorSoft, color, flexShrink: 0 }}>
       {children}
@@ -223,7 +297,9 @@ function IconBadge({ color, colorSoft, size = 34, radius = 10, children }) {
   );
 }
 
-function ProgressRing({ c, percent, size = 148, stroke = 11, color }) {
+type ProgressRingProps = { c: Palette; percent: number; size?: number; stroke?: number; color: string };
+
+function ProgressRing({ c, percent, size = 148, stroke = 11, color }: ProgressRingProps) {
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
   const clamped = Math.max(0, Math.min(percent, 100));
@@ -244,7 +320,7 @@ function ProgressRing({ c, percent, size = 148, stroke = 11, color }) {
   );
 }
 
-function ProgressBar({ c, percent, color }) {
+function ProgressBar({ c, percent, color }: { c: Palette; percent: number; color: string }) {
   return (
     <div style={{ height: 4, borderRadius: 4, background: c.border, overflow: "hidden", marginTop: 12 }}>
       <div style={{ height: "100%", width: `${Math.max(2, Math.min(100, percent))}%`, background: color, transition: "width .8s cubic-bezier(.22,1,.36,1)" }} />
@@ -252,7 +328,18 @@ function ProgressBar({ c, percent, color }) {
   );
 }
 
-function StatCard({ c, icon, label, value, sub, color, colorSoft, percent }) {
+type StatCardProps = {
+  c: Palette;
+  icon: ReactNode;
+  label: ReactNode;
+  value: ReactNode;
+  sub?: ReactNode;
+  color: string;
+  colorSoft: string;
+  percent?: number;
+};
+
+function StatCard({ c, icon, label, value, sub, color, colorSoft, percent }: StatCardProps) {
   return (
     <Card c={c} style={{ padding: "18px 18px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
@@ -266,7 +353,7 @@ function StatCard({ c, icon, label, value, sub, color, colorSoft, percent }) {
   );
 }
 
-function Field({ c, label, children }) {
+function Field({ c, label, children }: { c: Palette; label: ReactNode; children: ReactNode }) {
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <span style={{ fontFamily: FONT_BODY, fontSize: 12, color: c.subtext }}>{label}</span>
@@ -275,15 +362,15 @@ function Field({ c, label, children }) {
   );
 }
 
-function inputStyle(c) {
+function inputStyle(c: Palette): CSSProperties {
   return { background: c.inputBg, border: `1px solid ${c.border}`, borderRadius: 9, padding: "8px 10px", color: c.text, fontFamily: FONT_MONO, fontSize: 13.5, outline: "none" };
 }
 
-function pillBtn(c, tone) {
+function pillBtn(c: Palette): CSSProperties {
   return { display: "flex", alignItems: "center", gap: 6, padding: "8px 13px", borderRadius: 9, border: `1px solid ${c.border}`, background: c.inputBg, color: c.text, fontFamily: FONT_BODY, fontSize: 12.5, whiteSpace: "nowrap" };
 }
 
-function RuleRow({ c, rule }) {
+function RuleRow({ c, rule }: { c: Palette; rule: Rule }) {
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 0", borderBottom: `1px solid ${c.border}`, gap: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
@@ -298,21 +385,22 @@ function RuleRow({ c, rule }) {
 }
 
 const TIMELINE_STYLE = {
-  checkin: { color: "green", icon: LogIn, label: (s) => `Check in — ${formatClock(s.time)}` },
-  "checkin-work": { color: "green", icon: Activity, label: null },
-  resume: { color: "green", icon: Activity, label: null },
-  break: { color: "amber", icon: Coffee, label: null },
-  checkout: { color: "violet", icon: CheckCircle2, label: (s) => `Check out — ${formatClock(s.time)}` },
-};
+  checkin: { color: "green", icon: LogIn },
+  "checkin-work": { color: "green", icon: Activity },
+  resume: { color: "green", icon: Activity },
+  break: { color: "amber", icon: Coffee },
+  checkout: { color: "violet", icon: CheckCircle2 },
+} satisfies Record<TimelineSegment["type"], { color: AccentColor; icon: LucideIcon }>;
 
-function TimelineRow({ c, seg }) {
+function TimelineRow({ c, seg }: { c: Palette; seg: TimelineSegment }) {
   const meta = TIMELINE_STYLE[seg.type];
   const Icon = meta.icon;
-  const colorMap = { green: [c.green, c.greenSoft], amber: [c.amber, c.amberSoft], violet: [c.violet, c.violetSoft] };
+  const colorMap: Record<AccentColor, [string, string]> = { green: [c.green, c.greenSoft], amber: [c.amber, c.amberSoft], violet: [c.violet, c.violetSoft] };
   const [color, colorSoft] = colorMap[meta.color];
-  let title, right = null;
+  let title: string;
+  let right: string | null = null;
   if (seg.type === "checkin" || seg.type === "checkout") {
-    title = meta.label(seg);
+    title = `${seg.type === "checkin" ? "Check in" : "Check out"} — ${formatClock(seg.time)}`;
   } else if (seg.type === "break") {
     title = `Break — ${formatClock(seg.from)} to ${formatClock(seg.to)}`;
     right = formatDuration(seg.to - seg.from);
@@ -337,7 +425,7 @@ function TimelineRow({ c, seg }) {
 
 const LOADING_STEPS = ["Parsing biometric logs…", "Calculating work sessions…", "Computing work hours…", "Generating dashboard…"];
 const SAMPLE_LOG = "11:02\nBiometric.\n11:09\nBiometric.\n11:11\nBiometric.\n12:52\nBiometric.\n13:33\nBiometric.\n17:00\nBiometric.\n17:01\nBiometric.\n20:12\nBiometric.";
-const BREAK_COLORS_KEY = ["violet", "blue", "amber", "teal"];
+const BREAK_COLORS_KEY: BreakColorKey[] = ["violet", "blue", "amber", "teal"];
 const celebrateSuccess = () => {
   const duration = 1400;
   const animationEnd = Date.now() + duration;
@@ -387,7 +475,7 @@ const celebrateSuccess = () => {
   }, 120);
 };
 export default function App() {
-  const [theme, setTheme] = useState("dark");
+  const [theme, setTheme] = useState<Theme>("dark");
   const c = PALETTE[theme];
 
   const [now, setNow] = useState(new Date());
@@ -400,7 +488,7 @@ export default function App() {
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
   const [policyOpen, setPolicyOpen] = useState(false);
-  const [settings, setSettings] = useState({
+  const [settings, setSettings] = useState<Settings>({
     name: "", officeStart: "11:30", officeEnd: "20:30", requiredHours: "8", maxBreak: "60", latestCheckIn: "11:30",
   });
 
@@ -408,17 +496,16 @@ export default function App() {
   const [isCalculating, setIsCalculating] = useState(false);
   const [loadingStep, setLoadingStep] = useState(0);
   const [progress, setProgress] = useState(0);
-  const [result, setResult] = useState(null);
-  const [error, setErrorMsg] = useState(null);
+  const [result, setResult] = useState<CalculationResult | null>(null);
+  const [error, setErrorMsg] = useState<string | null>(null);
   const [copyMsg, setCopyMsg] = useState("");
 
-  const [history, setHistory] = useState([]);
+  const [history, setHistory] = useState<HistoryRow[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
   const [sortDesc, setSortDesc] = useState(true);
   const [showAllHistory, setShowAllHistory] = useState(false);
-const [showSuccess, setShowSuccess] = useState(false);
-  const resultsRef = useRef(null);
-  const printRef = useRef(null);
+  const [showSuccess, setShowSuccess] = useState(false);
+  const resultsRef = useRef<HTMLDivElement>(null);
 
   const handleCalculate = useCallback(() => {
     setErrorMsg(null);
@@ -449,7 +536,7 @@ const [showSuccess, setShowSuccess] = useState(false);
 
     setTimeout(() => {
       const computed = computeResult(timestamps, settings, Math.round(nowMinutes));
-      if (computed.error) {
+      if ("error" in computed) {
         setErrorMsg(computed.error);
         setIsCalculating(false);
         return;
@@ -472,7 +559,7 @@ const [showSuccess, setShowSuccess] = useState(false);
     }, totalDuration + 50);
   }, [logText, settings, nowMinutes]);
 
-  function handleTextareaKeyDown(e) {
+  function handleTextareaKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
       handleCalculate();
@@ -483,7 +570,7 @@ const [showSuccess, setShowSuccess] = useState(false);
     try {
       const text = await navigator.clipboard.readText();
       if (text) setLogText(text);
-    } catch (e) {
+    } catch {
       setErrorMsg("Couldn't read from clipboard — paste manually with Ctrl/Cmd+V.");
     }
   }
@@ -531,7 +618,7 @@ const [showSuccess, setShowSuccess] = useState(false);
     w.print();
   }
 
-  function deleteHistoryRow(id) {
+  function deleteHistoryRow(id: number) {
     setHistory((h) => h.filter((r) => r.id !== id));
   }
 
@@ -559,10 +646,10 @@ const [showSuccess, setShowSuccess] = useState(false);
 
   const alertCount = result ? result.rules.filter((r) => !r.pass).length : 0;
 
-  const statusColor = (status) => (status === "Working" ? c.green : status === "Completed" ? c.violet : c.amber);
-  const statusSoft = (status) => (status === "Working" ? c.greenSoft : status === "Completed" ? c.violetSoft : c.amberSoft);
+  const statusColor = (status: WorkStatus) => (status === "Working" ? c.green : status === "Completed" ? c.violet : c.amber);
+  const statusSoft = (status: WorkStatus) => (status === "Working" ? c.greenSoft : status === "Completed" ? c.violetSoft : c.amberSoft);
 
-  const officeSummary = `Work ${settings.requiredHours}h • Break ${formatDuration(parseInt(settings.maxBreak || 0, 10))} • Logout before ${formatClock(toMinutes(settings.officeEnd))}`;
+  const officeSummary = `Work ${settings.requiredHours}h • Break ${formatDuration(parseInt(settings.maxBreak || "0", 10))} • Logout before ${formatClock(toMinutes(settings.officeEnd))}`;
 
   return (
     <div style={{ minHeight: "100vh", width: "100%", background: `radial-gradient(circle at 12% -10%, ${c.pageGrid} 0%, transparent 45%), ${c.pageBg}`, fontFamily: FONT_BODY, color: c.text, transition: "background 0.3s ease" }}>
@@ -691,7 +778,7 @@ const [showSuccess, setShowSuccess] = useState(false);
           <StatCard c={c} icon={<LogOut size={17} />} label="Expected logout" color={c.green} colorSoft={c.greenSoft}
             value={result ? formatClock(result.expectedLogout) : "—"} sub={result ? `${formatDuration(Math.max(0, result.expectedLogout - Math.round(nowMinutes)))} remaining` : "—"}
             percent={result ? result.targetPercent : 0} />
-          <StatCard c={c} icon={<ShieldCheck size={17} />} label="Status" color={statusColor(result ? result.status : "")} colorSoft={statusSoft(result ? result.status : "")}
+          <StatCard c={c} icon={<ShieldCheck size={17} />} label="Status" color={result ? statusColor(result.status) : c.amber} colorSoft={result ? statusSoft(result.status) : c.amberSoft}
             value={result ? result.status : "Idle"} sub={result ? `${result.compliance}% policy compliant` : "Awaiting log"}
             percent={result ? result.compliance : 0} />
         </div>
@@ -883,9 +970,9 @@ const [showSuccess, setShowSuccess] = useState(false);
                   <ResponsiveContainer>
                     <PieChart>
                       <Pie data={result.breakSegments} dataKey="duration" nameKey="from" innerRadius={42} outerRadius={68} paddingAngle={3}>
-                        {result.breakSegments.map((seg, i) => <Cell key={i} fill={c[BREAK_COLORS_KEY[i % BREAK_COLORS_KEY.length]]} stroke="none" />)}
+                        {result.breakSegments.map((_, i) => <Cell key={i} fill={c[BREAK_COLORS_KEY[i % BREAK_COLORS_KEY.length]]} stroke="none" />)}
                       </Pie>
-                      <Tooltip contentStyle={{ background: c.panelSolid, border: `1px solid ${c.border}`, borderRadius: 8, fontFamily: FONT_BODY, fontSize: 12 }} formatter={(v) => [formatDuration(v), "Break"]} />
+                      <Tooltip contentStyle={{ background: c.panelSolid, border: `1px solid ${c.border}`, borderRadius: 8, fontFamily: FONT_BODY, fontSize: 12 }} formatter={(value) => [formatDuration(Number(value ?? 0)), "Break"]} />
                     </PieChart>
                   </ResponsiveContainer>
                   <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
